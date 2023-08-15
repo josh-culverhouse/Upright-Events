@@ -1,0 +1,600 @@
+/*
+ _____         _              ___    _____  _     
+(  _  )       ( )_  _        (  _`\ (  _  )( )    
+| (_) |   ___ | ,_)(_) _   _ | |_) )| (_) || |    
+|  _  | /'___)| |  | |( ) ( )| ,__/'|  _  || |  _ 
+| | | |( (___ | |_ | || \_/ || |    | | | || |_( )
+(_) (_)`\____)`\__)(_)`\___/'(_)    (_) (_)(____/'
+ _   _                         _      _   
+( ) ( )              _        ( )    ( )_ 
+| | | | _ _    _ __ (_)   __  | |__  | ,_)
+| | | |( '_`\ ( '__)| | /'_ `\|  _ `\| |  
+| (_) || (_) )| |   | |( (_) || | | || |_ 
+(_____)| ,__/'(_)   (_)`\__  |(_) (_)`\__)
+       | |             ( )_) |            
+       (_)              \___/'            
+               _                         
+/'\_/`\       ( )_        _              
+|     |   __  | ,_) _ __ (_)   ___   ___ 
+| (_) | /'__`\| |  ( '__)| | /'___)/',__)
+| | | |(  ___/| |_ | |   | |( (___ \__, \
+(_) (_)`\____)`\__)(_)   (_)`\____)(____/												 
+*/
+**************************************************************************
+* Project title: Upright event metrics				         
+* Datasets used: BCS70 activpal stepping bouts output	          
+* Author: J Culverhouse												     
+* Date: 08/05/2023													     
+* Description: Stata code deriving upright event metrics from posture    
+* 			   data (activPAL stepping output)							 
+**************************************************************************
+
+**************************************************************************
+*** Install packages							  					   
+**************************************************************************
+
+* asgen for step-weight cadence
+ssc install asgen
+
+**************************************************************************
+
+
+*** Following lines of code imports the activPAL stepping output .csv files into Stata, taking the name of the file (which should include participant ID) and adding it as a new variable (so ID can be extracted later), then appends them all in the same Stata file
+
+cd "folder_path"
+
+local filepath = "`c(folder_path)'"
+
+local files : dir "`filepath'" files "*.csv"
+
+tempfile name 
+save `name', replace empty
+
+foreach x of local files {
+
+	qui: import delimited "`x'", delimiter(";")  case(preserve) clear
+	
+	qui: gen path = subinstr("`x'", ".csv", "", .)
+
+	append using `name'
+	
+	save `name', replace
+	}
+
+*** The above method of importing imports the files 'as-is', which includes 14 unnesscary rows at the top of each file (with activPAL software info), and variable names are not detected. The lines of code below rename the variables to match the activPAL stepping output var names, and drops the unnesscary rows.
+
+* Rename vars to match activPAL var names (as close as possible; lowercase, no parentheses etc.)
+
+rename v1 time
+rename v2 time_approx
+rename v3 data_count
+rename v4 event_type
+rename v5 duration_s
+rename v6 upright_bout_number
+rename v7 upright_bout_duration_s
+rename v8 num_steps
+rename v9 cadence
+
+*** Drops the excess 14 rows per person (by dropping rows that are missing all of these key vars - check this does not drop 'true' missing data, but it should not do this - dropped cases should equal no. of participants x13)
+drop if data_count=="" & event_type=="" & num_steps=="" & cadence==""
+* Same as above, but for rows of var names (dropped cases should equal no. of participants x1)
+drop if time == "Time"
+
+**************************************************************************
+*** Extract numeric ID from bcs70 ID, destring						   ***
+**************************************************************************
+
+* Extract the id participant number from the path string name (change the content of the parentheses as need - parentheses contains varname, the character to start extracting from, and the number of characters to extract)
+gen id = substr(path,1,6)
+
+* Destring all vars
+
+destring _all, replace
+
+* If you just want the actiPAL output appended, you can stop here
+
+**************************************************************************
+*** Generate data and time from excel time format					   ***
+**************************************************************************
+
+*** activPAL uses Excel time format - this code makes it readable by Stata
+
+gen date = time + td(30dec1899)
+format date %td	
+	
+gen double starttime = round((time+td(30dec1899))*864000)*100
+* Formats time to 10th of second (activPAL frequency)
+format starttime %tcHH:MM:SS.s
+
+**************************************************************************
+*** Order and drop unneeded vars									   ***
+**************************************************************************
+
+order id date starttime
+
+drop time time_approx upright_bout_number upright_bout_duration_s v10 path
+
+**************************************************************************
+**************************************************************************
+
+* Data is now set ready for the code
+
+**************************************************************************
+*** Dropping non valid days / wear									   ***
+**************************************************************************
+
+*** Dropping nonwear
+
+/* The code below does the followinig
+	1) Identifies the data_count values on nonwear rows
+	2) Generates a column of the minimum nonwear data count per person ( the first nonwear event)
+	3) Drops cases with a data count >= than the minimum nonwear datacount (which removes all data from the first nonwear period, per person)
+	4) Drops generated vars
+	
+	Note: this works for cohorts where the device was applied by researcher/nurse, as there should be no non-wear. Further steps would need to be applied if devices were sent in the post and there is potential non-wear to clean before device is applied. This method assumes the first non-wear is after device is removed.
+*/
+
+* 1
+gen nonwear_datacount = data_count if event_type==4
+* 2
+bysort id : egen nonwear_value = min(nonwear_datacount)
+* 3
+drop if data_count >= nonwear_value
+* 4
+drop nonwear_datacount nonwear_value
+
+
+***Same again but for -1s
+* 1
+gen nonwear_datacount = data_count if event_type==-1
+* 2
+bysort id : egen nonwear_value = min(nonwear_datacount)
+* 3
+drop if data_count >= nonwear_value
+* 4
+drop nonwear_datacount nonwear_value
+
+*** Dropping first parital day and any days over 7
+
+* Generates a cumulative count of bouts per day
+bysort id date (data_count), sort : gen daybouts = _n
+* Generates a var that with only the 1st bout of each day as 1
+bysort id (data_count), sort : gen cu_days = sum(daybouts) if daybouts ==1
+* Generates var with numbered days from 1 
+bysort id date (data_count), sort : egen days_new = max(cu_days)
+
+* Drops day 1 and any day after 8 (which is the 7th full day)
+drop if days_new ==1 | days_new >8
+
+*** Calculating total wear time from day2 (first whole day)
+
+* Genertate seconds from midnight that 1st bout starts
+gen stHour = hh(starttime)
+gen stMin = mm(starttime)
+gen stSec = ss(starttime)
+gen startsecs = (stHour*60*60) + (stMin*60) + stSec if cu_days ==2
+
+bysort id : egen tot_dur = total(duration_s)
+
+gen fin_dur = tot_dur + startsecs if cu_days ==2
+
+gen tot_days_wear = fin_dur /60 / 60 / 24
+
+*** Determining if last bout of 7th day is nonwear/invalid due to length, or crosses midnight into 8th day and needs to be dropped
+
+* Generates col for each participant with the max data count vale (i.e. the final bout for each person)
+bysort id (data_count), sort : egen fin_bt_data_count = max(data_count)
+
+* Fills in all cells with total days value
+bysort id (data_count): egen tot_days_wear_new = mean(tot_days_wear)
+
+* Drops final bout if: over 7 days_new
+drop if tot_days_wear_new >7 & tot_days_wear_new <. & data_count == fin_bt_data_count
+
+*** Recalculating total days for remaining participants
+drop tot_days_wear fin_dur tot_dur tot_days_wear_new
+bysort id : egen tot_dur = total(duration_s)
+gen fin_dur = tot_dur + startsecs if cu_days ==2
+gen tot_days_wear = fin_dur /60 / 60 / 24
+
+sum tot_days_wear if tot_days_wear >7 & tot_days_wear <., detail
+
+**************************************************************************
+*** Participant count												   ***
+**************************************************************************
+*** Create a participant count (1) at their first bout - as reference for counting participants and creating new vars later - to get single values of repeated values in one consistent row
+
+bysort  id (data_count), sort : gen participantcount=_n
+gen participants=1 if participantcount==1
+drop participantcount
+sum participants
+
+drop startsecs fin_bt_data_count tot_dur fin_dur tot_days_wear cu_days
+
+**************************************************************************
+*** Day identifier (cumul count of first of each)   				   ***
+**************************************************************************
+
+* Uses daybouts to cumul count first bout of each day
+bysort	id (data_count), sort : gen day_first_bt = sum(daybouts) if daybouts==1
+
+**************************************************************************
+*** Convert duration vars to minutes					  			   ***
+**************************************************************************
+gen dur_min = duration_s/60
+
+**************************************************************************
+*** Recoding event_types											   ***
+**************************************************************************
+
+*** Needed for the CREA version output from activPAL - will be slighty different for VANE version as it won't have cycling, and different types of sitting, just 0,1,2 hopefully
+
+* Importing from SPSS changed the decimal values - below covers anything above 2
+* Recodes cycling to stepping (as this is what the 'steps' would have been allocated too in the older VANE algorithm)
+recode event_type 2.01/2.1=2
+* Recodes all others (seated transport, types of lying, etc.) to sit/lying
+recode event_type 3.01/5=0
+
+**************************************************************************
+*** Upright event creation											   ***
+**************************************************************************
+
+*** Upright bout number across measurement period
+* Classfies upright postures with a 1 
+gen upr_bt_num_ =.
+bysort id (data_count) : replace upr_bt_num_ = 1 if event_type != 0
+
+* Creates a cumulative count within upright events (upright postures between two sit/lying events) *NOTE* The 1 value for this var becomes the classifier for each upright event later on
+gen upr_bt_num__ =.
+bysort id (data_count): replace upr_bt_num__ = cond(missing(upr_bt_num_[_n-1]), upr_bt_num_, upr_bt_num_ + upr_bt_num__[_n-1])
+
+* Cumulative count of each upright event per person
+bysort id (data_count), sort: gen upr_bt_num___ = sum(upr_bt_num__) if upr_bt_num__==1
+
+* Fills in each upright event with its respective cumulative count
+gen upr_bt_num = upr_bt_num___
+bysort id (data_count): replace upr_bt_num = upr_bt_num[_n-1] if missing(upr_bt_num) & upr_bt_num_==1
+
+*** Upright event duration
+* Minutes
+bysort id upr_bt_num (data_count) : egen upr_bt_dur_min = sum(dur_min) if upr_bt_num !=.
+sort id data_count
+* Seconds
+bysort id upr_bt_num (data_count) : egen upr_bt_dur_s = sum(duration_s) if upr_bt_num !=.
+sort id data_count
+
+*** Cumulative count of upright event per day
+bysort id date (data_count), sort: gen upr_bt_num_day___ = sum(upr_bt_num__) if upr_bt_num__==1
+* Fills in each upright event with its respective cumulative count
+gen upr_bt_num_day = upr_bt_num_day___
+bysort id date (data_count): replace upr_bt_num_day = upr_bt_num_day[_n-1] if missing(upr_bt_num_day) & upr_bt_num_==1
+
+*** Sitting bout number across measurement period
+gen sit_bt_num_ =.
+bysort id (data_count) : replace sit_bt_num_ = 1 if event_type == 0
+* Cumulative count of sit events per persn
+bysort id (data_count), sort: gen sit_bt_num__ = sum(sit_bt_num_) if sit_bt_num_==1
+* Cumulative count of sit events per day
+bysort id date (data_count), sort: gen sit_bt_num_day = sum(sit_bt_num_) if sit_bt_num_==1
+
+**************************************************************************
+*** Upright 10 second MINIMUM event creation						   ***
+**************************************************************************
+
+* Upright events should not be less than 10s (if you applied the recommended minimums through PALbatch analysis), but this just checks. Can be used for events data, and change duration if you're interested in shorter/longer upright events.
+
+*** Upright bout >=10sec 
+bysort id (data_count) : gen upr_bt_10sec = sum(upr_bt_num__) if upr_bt_num__==1 & upr_bt_dur_s >=10
+
+bysort id (data_count): replace upr_bt_10sec = upr_bt_10sec[_n-1] if missing(upr_bt_10sec) & upr_bt_num_==1 & upr_bt_dur_s >=10
+
+**************************************************************************
+*** Sedentary bouts INCLUDING uprigths less than <10 seconds 		   ***
+**************************************************************************
+ 
+* Unlike upright bouts - sedentary bouts are only one row at a time (uprights can be 1s and 2s for multiple rows). The below creates count and duration vairbles for the time between >1min upright bouts - which can include multiple sedentary bouts and the upright bout/s <1min in between
+
+* An idiots way of creating ones in the gaps between >10s upr events
+gen sit_ = upr_bt_10sec +1
+replace sit_ =1 if sit_==.
+replace sit_ =. if sit_>1
+
+* Cumulative count within these bouts - allows for next step...
+gen sit__ =.
+bysort id (data_count): replace sit__ = cond(missing(sit_[_n-1]), sit_, sit_ + sit__[_n-1])
+* Cumulative count of 1s - therefore each sedentary bout
+bysort id (data_count), sort: gen sit_num = sum(sit__) if sit__==1
+* Fills in each bout with the bout number (to allow for sorting by bout number.)
+bysort id (data_count): replace sit_num = sit_num[_n-1] if missing(sit_num) & sit_==1
+
+*** Duration of gaps between >10sec upright bouts (sedentary time - but also with upr bts <10sec)
+bysort id sit_num (data_count) : egen sit_and_less_10sec_upr_dur_min = sum(dur_min) if sit_num !=.
+sort id data_count
+
+**************************************************************************
+** Creating filter for waking wear based on 1st bout (>=1min) after 5am **
+**************************************************************************
+
+* Putting a 1 qualifierfor waking wear time between 03:00 and 23:00, from first upright to last upright
+* Cumulative count of rows between these hours per day pp
+bysort id date (data_count) : gen wake_ = _n if stHour>=3 & stHour<24
+
+* Replaces the last row of a waking day - if the immediate row after is the first row of the next day (if there was literally one sleeping bout - it will give this a missing value)
+replace wake_ =. if wake_[_n+1]==1
+* Replaces final bout with missing (this because it crosses 24:00 and can make the wear_time more than the 20h window (3am-11pm))
+replace wake_=. if wake_[_n+1]==.
+
+* This generates waking wear time from first upright bout >=10sec after 3am - but with gaps (puts ones in all the upright bouts)
+bysort id date (data_count) : gen wake_time = 1 if stHour>=3 & upr_bt_10sec !=.
+*This then replaes missing values between 3am and middnight with 1s - so that all time after 3am filled with 1s
+replace wake_time =1 if wake_time[_n-1]==1 & stHour>3 & stHour<24
+* Final step replaces the wake_tie with missing if wake_ is missing, which is the time after 11pm - and the final bouts that may go into the next day etc.
+replace wake_time=. if wake_==.
+
+// Just to clarify - wake_ is now a continous count of rows per day from 3am, with final bout replaced with . if immediately proceed by the first bout of the next day, and if the final bout is sit/lying (we don't want to count these as the cross to the next day - they are the 'sleeping bouts')
+// and wake_time is now a classifier with 1s in every cell from the frist upright bout after 3am to the penultimate event before 11pm - because the last/next bout is the event that crosses into the next day, which we don;t want to count 
+
+drop wake_
+
+**************************************************************************
+*** 		  Deriving upright event and stepping metrics			   ***
+**************************************************************************
+
+*** No. upright events >10sec
+bysort id date (data_count ) : egen upr_10s_bts_per_day_ = sum(upr_bt_num__) if upr_bt_num__  ==1 & upr_bt_10sec !=. & wake_time ==1
+bysort id date (data_count ) : egen upr_10s_bts_per_day = max(upr_10s_bts_per_day_)
+drop upr_10s_bts_per_day_
+
+*** Upright duration per day
+bysort id date (data_count ) : egen upr_10s_dur_day_ = sum(dur_min) if wake_time ==1 & upr_bt_10sec !=.
+bysort id date (data_count ) : egen upr_10s_dur_day_min = max(upr_10s_dur_day_)
+drop upr_10s_dur_day_
+gen upr_10s_dur_day_h = upr_10s_dur_day_min/60
+
+*** Standing duration per day
+bysort id date (data_count ) : egen std_dur_day_ = sum(dur_min) if wake_time ==1 & upr_bt_10sec !=. & event_type==1
+bysort id date (data_count ) : egen std_dur_day_min = max(std_dur_day_)
+drop std_dur_day_
+gen std_dur_day_h = std_dur_day_min/60
+
+*** Stepping duration per day
+bysort id date (data_count ) : egen stp_dur_day_ = sum(dur_min) if wake_time ==1 & upr_bt_10sec !=. & event_type==2
+bysort id date (data_count ) : egen stp_dur_day_min = max(stp_dur_day_)
+drop stp_dur_day_
+gen stp_dur_day_h = stp_dur_day_min/60
+
+*** Stepping proportion per event metric
+* Stepping duration per upright evevnt
+bysort id date upr_bt_num_day (data_count) : egen within_stp_dur_ = sum(dur_min) if event_type==2
+bysort id date upr_bt_num_day (data_count) : egen within_stp_dur = max(within_stp_dur_) if upr_bt_num_day !=.
+sort id data_count
+drop within_stp_dur_
+replace within_stp_dur = 0 if upr_bt_num__==1 & within_stp_dur==.
+* Standing duration per upright evevnt
+bysort id date upr_bt_num_day (data_count) : egen within_std_dur_ = sum(dur_min) if event_type==1 
+bysort id date upr_bt_num_day (data_count) : egen within_std_dur = max(within_std_dur_) if upr_bt_num_day !=.
+sort id data_count
+drop within_std_dur_
+*** Propoertion of time stepping
+gen perc_dur_stp = (within_stp_dur / upr_bt_dur_min)*100
+
+*** Step-weighted mean cadence per upright bout
+bysort id date upr_bt_num_day : asgen stpw_mean_cad_ = cadence if event_type==2, w(num_steps)
+sort id data_count
+bysort id date upr_bt_num_day : egen stpw_mean_cad = max(stpw_mean_cad_)
+sort id data_count
+replace stpw_mean_cad =0 if stpw_mean_cad==. & within_stp_dur==0
+drop stpw_mean_cad_ 
+
+* No. of stepping events within upright
+bysort id date upr_bt_num_day (data_count) : egen within_num_stp_bts_ = sum(event_type) if event_type==2
+bysort id date upr_bt_num_day (data_count) : egen within_num_stp_bts__ = max(within_num_stp_bts_) if upr_bt_num_day !=.
+gen within_num_stp_bts = within_num_stp_bts__/2
+sort id data_count
+drop within_num_stp_bts_ within_num_stp_bts__
+replace within_num_stp_bts = 0 if within_stp_dur==0
+
+*** No. of steps within upright events
+bysort id date upr_bt_num_day (data_count) : egen within_num_stps = sum(num_steps) if upr_bt_num_day !=.
+sort id data_count
+
+*** Step count per day (withing >=10sec)
+bysort id date (data_count ) : egen steps_day_ = sum(num_steps) if wake_time ==1 & upr_bt_10sec !=.
+bysort id date (data_count ) : egen steps_day = max(steps_day_)
+drop steps_day_
+* Check
+list id if steps_day ==0 | steps_day ==.
+
+**************************************************************************
+** Valid day of wear (duration & no. upright events) classifier			**
+**************************************************************************
+* Calculate minutes of wear during wake time
+bysort id date (data_count) : egen wear_ = sum(dur_min) if wake_time ==1
+bysort id date (data_count) : egen wear_time_min = max(wear_)
+drop wear_
+* Adds a 1 classifier to wear that is valid (>=10 waking wear)
+bysort id date (data_count) : gen valid_wear =1 if wear_time_min >600 & wear_time_min <. & upr_10s_bts_per_day >3
+
+* Count valid days per person
+bysort id (data_count) : gen valid_days_ =1 if day_first_bt !=. & valid_wear==1
+bysort id (data_count) : egen valid_days__ = sum(valid_days_) if valid_days_==1 & valid_wear==1
+bysort id (data_count) : egen n_valid_days = max(valid_days__)
+
+drop valid_days_ valid_days__
+
+drop if valid_wear ==.
+
+**************************************************************************
+*** Burstiness - Between UPRIGHT events								   ***
+**************************************************************************
+
+*** BURSTINESS between upright events (n, mean(SD) of sit/lying bouts) ******
+
+* n - number of upright events per day
+// upr_10s_bts_per_day
+
+* t - mean duration of sit/lyig bouts
+bysort id date (data_count): egen mean_ = mean(sit_and_less_10sec_upr_dur_min) if sit__ ==1 & wake_time==1
+bysort id date (data_count): egen mean_sed_dur_day = max(mean_)
+drop mean_
+
+* 0 - mean duration of sit/lyig bouts
+bysort id date (data_count): egen sd_ = sd(sit_and_less_10sec_upr_dur_min) if sit__ ==1 & wake_time==1
+bysort id date (data_count): egen sd_sed_dur_day = max(sd_)
+drop sd_
+
+* burstiness between upright events
+gen burst_between_upr_bts = (sqrt(upr_10s_bts_per_day+1)*(sd_sed_dur_day/mean_sed_dur_day)-sqrt(upr_10s_bts_per_day-1))/((sqrt(upr_10s_bts_per_day+1)-2)*(sd_sed_dur_day/mean_sed_dur_day)+(sqrt(upr_10s_bts_per_day-1)))
+
+sum burst_between_upr_bts if day_first_bt !=. , detail
+
+**************************************************************************
+*** Burstiness - Between NON-UPRIGHT events							   ***
+**************************************************************************
+
+*** BURSTINESS between NON-upright events (n, mean(SD) of upright bouts) ******
+
+* n - number of upright events per day (already created)
+bysort id date (data_count ) : egen non_upr_bts_per_day_ = sum(sit__) if sit__  ==1 & wake_time ==1
+bysort id date (data_count ) : egen non_upr_bts_per_day = max(non_upr_bts_per_day)
+drop non_upr_bts_per_day_
+
+* t - mean duration of upright events per day
+bysort id date (data_count): egen mean_ = mean(upr_bt_dur_min) if upr_bt_num__ ==1 & wake_time==1
+bysort id date (data_count): egen mean_upr_dur_day = max(mean_)
+drop mean_
+
+* 0 - mean duration of sit/lyig bouts
+bysort id date (data_count): egen sd_ = sd(upr_bt_dur_min) if upr_bt_num__ ==1 & wake_time==1
+bysort id date (data_count): egen sd_upr_dur_day = max(sd_)
+drop sd_
+
+* burstiness between upright events
+gen burst_between_sed_bts = (sqrt(non_upr_bts_per_day+1)*(sd_upr_dur_day/mean_upr_dur_day)-sqrt(non_upr_bts_per_day-1))/((sqrt(non_upr_bts_per_day+1)-2)*(sd_upr_dur_day/mean_upr_dur_day)+(sqrt(non_upr_bts_per_day-1)))
+
+sum burst_between_sed_bts if day_first_bt !=. , detail
+
+**************************************************************************
+*** 																   ***
+***					FINAL VARIABLES	(1 value per person)			   ***
+*** 																   ***
+**************************************************************************
+
+*** Average waking wear hours 
+bysort id (data_count) : egen avg_waking_wear_ = mean(wear_time_min) if day_first_bt !=.
+bysort id (data_count) : egen avg_waking_wear_h_ = max(avg_waking_wear_)
+gen avg_waking_wear_h = avg_waking_wear_h_/60
+drop avg_waking_wear_ avg_waking_wear_h_
+
+************************** DAILY SUMMARIES *******************************
+
+*** Average number of bouts per day per person
+bysort id (data_count) : egen avg_n_upr_bts_day_ = mean(upr_10s_bts_per_day) if day_first_bt !=. 
+bysort id (data_count) : egen avg_n_upr_bts_day = max(avg_n_upr_bts_day_)
+drop avg_n_upr_bts_day_
+
+*** Average upright duration per day
+bysort id (data_count) : egen avg_upr_dur_day_ = mean(upr_10s_dur_day_h) if day_first_bt !=.
+bysort id (data_count) : egen avg_upr_dur_day = max(avg_upr_dur_day_)
+drop avg_upr_dur_day_
+
+*** Average standing duration per day
+bysort id (data_count) : egen avg_std_dur_day_ = mean(std_dur_day_h) if day_first_bt !=.
+bysort id (data_count) : egen avg_std_dur_day = max(avg_std_dur_day_)
+drop avg_std_dur_day_
+
+*** Average stepping duration per day
+bysort id (data_count) : egen avg_stp_dur_day_ = mean(stp_dur_day_h) if day_first_bt !=.
+bysort id (data_count) : egen avg_stp_dur_day = max(avg_stp_dur_day_)
+drop avg_stp_dur_day_
+
+*** Average stepping proportion per upright
+bysort id (data_count) : egen avg_stp_prop_ = mean(perc_dur_stp) if upr_bt_num__ ==1 & upr_bt_10sec !=. & wake_time ==1
+bysort id (data_count) : egen avg_stp_prop = max(avg_stp_prop_)
+drop avg_stp_prop_
+
+*** Average stepping events per day per person (>10)
+bysort id date (data_count) : egen n_stp_evnts_10_per_day_ = sum(event_type) if event_type==2 & num_steps>=10
+bysort id date (data_count) : egen n_stp_evnts_10_per_day__ = max(n_stp_evnts_10_per_day_)
+bysort id date (data_count) : gen n_stp_evnts_10_per_day___ = n_stp_evnts_10_per_day__/2
+bysort id (data_count) : egen avg_n_stp_evnts_10_per_day_ = mean(n_stp_evnts_10_per_day___) if day_first_bt !=.
+bysort id (data_count) : egen avg_n_stp_evnts_per_day_10 = max(avg_n_stp_evnts_10_per_day_)
+drop n_stp_evnts_10_per_day_ n_stp_evnts_10_per_day__  avg_n_stp_evnts_10_per_day_ avg_n_stp_evnts_10_per_day_
+
+*** Avg. step count per day
+bysort id (data_count ) : egen avg_steps_day_ = mean(steps_day) if day_first_bt !=.
+bysort id (data_count ) : egen avg_steps_day = max(avg_steps_day)
+drop avg_steps_day_ 
+
+**************************** COMPOSITION *********************************
+
+*** Average duration of upright event
+bysort id (data_count) : egen avg_upr_event_dur_ = mean(upr_bt_dur_min) if upr_bt_num__ ==1 & upr_bt_10sec !=. & wake_time ==1
+bysort id (data_count) : egen avg_upr_event_dur = max(avg_upr_event_dur_)
+drop avg_upr_event_dur_
+
+*** Average number of step events per upright event
+bysort id (data_count) : egen avg_within_num_stp_bts_ = mean(within_num_stp_bts) if upr_bt_num__ ==1 & upr_bt_10sec !=. & wake_time ==1
+bysort id (data_count) : egen avg_within_num_stp_bts = max(avg_within_num_stp_bts_)
+drop avg_within_num_stp_bts_
+
+*** Average number of steps per upright event
+bysort id (data_count) : egen avg_within_num_stps_ = mean(within_num_stps) if upr_bt_num__ ==1 & upr_bt_10sec !=. & wake_time ==1
+bysort id (data_count) : egen avg_within_num_stps = max(avg_within_num_stps_)
+drop avg_within_num_stps_
+
+*** Average step-weight cadence per upright event
+bysort id (data_count) : egen avg_stpw_mean_cad_ = mean(stpw_mean_cad) if upr_bt_num__ ==1 & upr_bt_10sec !=. & wake_time ==1
+bysort id (data_count) : egen avg_stpw_mean_cad = max(avg_stpw_mean_cad_)
+drop avg_stpw_mean_cad_
+
+************************* PATTERN METRICS ********************************
+
+*** Average upright burstines (inter-event-time)
+bysort id (data_count ) : egen avg_inter_burst_ = mean(burst_between_upr_bts) if day_first_bt !=.
+bysort id (data_count ) : egen avg_inter_burst = max(avg_inter_burst_)
+drop avg_inter_burst_
+*** Average non-upright burstiness
+bysort id (data_count ) : egen avg_intra_burst_ = mean(burst_between_sed_bts) if day_first_bt !=.
+bysort id (data_count ) : egen avg_intra_burst = max(avg_intra_burst_)
+drop avg_intra_burst_
+
+************************* STEPPING METRICS *******************************
+
+*** Longest continuous stepping event (>=10 steps)
+bysort id (data_count) : egen longest_step_bt_min_ = max(dur_min) if event_type ==2 & wake_time ==1 & num_steps >=10
+bysort id (data_count) : egen longest_step_bt_min = max(longest_step_bt_min_)
+drop longest_step_bt_min_
+
+*** Step-weighted mean cadence of every step count
+bysort id (data_count) : asgen avg_stpw_cad_all_ = cadence if wake_time==1 & event_type==2 & num_steps>=10, w(num_steps)
+bysort id (data_count) : egen avg_stpw_cad_all = max(avg_stpw_cad_all_)
+drop avg_stpw_cad_all_
+
+*** Average steps per stepping event (>=10 steps)
+bysort id (data_count) : egen avg_stps_per_stp_evnt_10_ = mean(num_steps) if event_type==2 & wake_time ==1 & num_steps >=10
+bysort id (data_count) : egen avg_stps_per_stp_evnt_10 = max(avg_stps_per_stp_evnt_10_)
+drop avg_stps_per_stp_evnt_10_
+
+***Average duration per stepping event-time (>=10 steps)
+bysort id (data_count): egen avg_dur_stpev_10_ = mean(duration_s) if wake_time ==1 & event_type ==2 & num_steps>=10
+bysort id (data_count): egen avg_dur_stpev_10 = max(avg_dur_stpev_10_)
+drop avg_dur_stpev_10_
+
+*** Highest cadence stepping event (=10 steps)
+bysort id (data_count) : egen highest_cad_stp_event_ = max(cadence) if wake_time==1 & event_type==2 & num_steps >=10
+bysort id (data_count) : egen highest_cad_stp_event = max(highest_cad_stp_event_)
+drop highest_cad_stp_event_
+
+******************************* TIDYING UP *********************************
+
+* Collapse to one row per person
+drop if participants !=1
+
+*** Dropping unneeded vars
+drop date - valid_wear
+drop n_stp_evnts_10_per_day___
+drop datetime mean_sed_dur_day-burst_between_sed_bts
+
+***
+
